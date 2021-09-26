@@ -9,12 +9,12 @@ import (
 // APIServer ...
 type APIServer struct {
 	setup setup.Setup
-	backend backendEngine.Backend
+	backend backendEngine.BackendInterface
 }
 
 // NewAPIServer ...
 func NewAPIServer(setup setup.Setup) (APIServer, error) {
-	backend := backendEngine.NewBackend(&setup)
+	backend := backendEngine.NewBackendInterface(&setup)
 	return APIServer{
 		setup: setup,
 		backend: backend,
@@ -25,9 +25,9 @@ func NewAPIServer(setup setup.Setup) (APIServer, error) {
 func (server *APIServer) Listen() error {
 	router := gin.Default()
 
-	router.POST("/", server.Index) // Serves Gigamono page.
+	router.GET("/", server.Index) // Serves Gigamono page.
 	router.POST("/login", server.Login) // X-WORKSPACE-NAME
-	router.POST("/run/*all", server.Run) // X-WORKSPACE-ID
+	router.Any("/run/*all", server.Run) // X-WORKSPACE-ID
 
 	return router.Run(":5050") // TODO: Get from setup.Config
 }
