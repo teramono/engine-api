@@ -2,7 +2,7 @@ package engine
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -63,6 +63,8 @@ func (server *APIServer) Run(ctx *gin.Context) {
 		return
 	}
 
+	// TODO: SEC: Validate workspace id.
+
 	if err := server.dispatchViaInterface(ctx, workspaceID, server.backend.Login); err != nil {
 		response.SetErrorResponseWithSourceType(
 			ctx,
@@ -77,7 +79,7 @@ func (server *APIServer) Run(ctx *gin.Context) {
 func (server *APIServer) dispatchViaInterface(
 	ctx *gin.Context,
 	workspaceID string,
-	interfaceFunc func(s string, r request.Request) (*http.Response, error),
+	interfaceFunc func(r request.Request) (*http.Response, error),
 ) error {
 	// Construct request.
 	req, err := request.NewRequestFromContext(ctx)
@@ -86,21 +88,19 @@ func (server *APIServer) dispatchViaInterface(
 	}
 
 	// Call interface function with request.
-	resp, err := interfaceFunc(workspaceID, req)
+	resp, err := interfaceFunc(req)
 	if err != nil {
 		return err
 	}
 
-	defer resp.Body.Close()
-
 	// Get body bytes from response.
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bytes, err := response.ReadBodyBytes(resp)
 	if err != nil {
 		return err
 	}
 
 	body := map[string]interface{}{}
-	if err = json.Unmarshal(bodyBytes, &body); err != nil {
+	if err = json.Unmarshal(bytes, &body); err != nil {
 		return err
 	}
 
