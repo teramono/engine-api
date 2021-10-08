@@ -3,40 +3,39 @@ package server
 import (
 	"fmt"
 
+	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
-	"github.com/teramono/utilities/pkg/broker"
+	"github.com/go-playground/validator/v10"
 	"github.com/teramono/utilities/pkg/setup"
 )
 
-// APIServer ...
 type APIServer struct {
 	setup.APIEngineSetup
-	backends []broker.Address
+	Validator *validator.Validate
 }
 
-// NewAPIServer ...
 func NewAPIServer(setup setup.APIEngineSetup) (APIServer, error) {
+	valid := validator.New()
+
 	return APIServer{
 		APIEngineSetup: setup,
-		backends:       []broker.Address{},
+		Validator:      valid,
 	}, nil
 }
 
-// Listen ...
 func (server *APIServer) Listen() error {
 	router := gin.Default()
 
-	// API-specific routes
-	router.GET("/", server.LoadGigamonoFramework)
+	// UI routes.
+	router.Use(static.Serve("/", static.LocalFile(server.Config.UI.Dir, true)))
+
+	// Workspaces routes.
 	workpacesRouter := router.Group("/workspaces")
 	{
 		workpacesRouter.POST("", server.CreateWorkspaces)
-		workpacesRouter.GET("", server.GetWorkspaces)
+		workpacesRouter.POST("/login", server.LoginWorkspaces)
+		workpacesRouter.Any("/run/*all", server.RunWorkspaces)
 	}
-
-	// Backend-specific routes
-	router.POST("/login", server.Login)
-	router.Any("/run/*all", server.Run)
 
 	return router.Run(fmt.Sprintf(":%d", server.Config.Engines.API.Port))
 }
