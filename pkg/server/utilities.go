@@ -2,47 +2,59 @@ package server
 
 import (
 	"fmt"
-	"log"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
-	"github.com/teramono/utilities/pkg/broker"
+	"github.com/teramono/utilities/pkg/database/models"
+	"github.com/teramono/utilities/pkg/messages"
+	"github.com/teramono/utilities/pkg/request"
 )
 
-func (server *APIServer) subjectOf(action string, id uint) string {
-	version := server.Config.Broker.Subscriptions.Workspaces.Version
-	return broker.SubjectOf(version, action, "workspaces", id)
-}
-
-func (server *APIServer) logPanicf(format string, v ...interface{}) {
-	version := server.Config.Broker.Subscriptions.Logs.Version
-	subject := broker.SubjectOf(version, "create", "logs", "panic")
-	message := fmt.Sprintf(format, v...)
-
-	if err := server.Publish(subject, []byte(message)); err != nil {
-		log.Printf("unable to publish error log: %v", err)
-	}
-
-	log.Panicf(format, v...)
-}
-
-func (server *APIServer) logf(format string, v ...interface{}) {
-	version := server.Config.Broker.Subscriptions.Logs.Version
-	subject := broker.SubjectOf(version, "create", "logs", "panic")
-	message := fmt.Sprintf(format, v...)
-
-	if err := server.Publish(subject, []byte(message)); err != nil {
-		log.Printf("unable to publish error log: %v", err)
-	}
-
-	log.Printf(format, v...)
-}
-
-func GetHeadersAsInterface(ctx *gin.Context) map[string]interface{} {
-	headers := map[string]interface{}{}
+func (server *APIServer) getHeaders(ctx *gin.Context) map[string][]string {
+	headers := map[string][]string{}
 
 	for k, v := range ctx.Request.Header {
 		headers[k] = v
 	}
 
 	return headers
+}
+
+func (server *APIServer) getWorkspaceID(ctx *gin.Context) (uint, error) {
+	var workspaceID uint
+
+	// First get workspace id.
+	workspaceIDStr := ctx.GetHeader(request.WorkspaceIDHeader)
+	if workspaceIDStr == "" {
+		// Fallback to using workpace name header if it exists.
+		workspaceName := ctx.GetHeader(request.WorkspaceIDHeader)
+		if workspaceName == "" {
+			return 0, fmt.Errorf(messages.InvalidWorkspaceIDAndNameHeader.String())
+		}
+
+		// Get workspace by name.
+		workspace, err := (&models.Workspace{Name: workspaceName}).GetByName(&server.DB)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%s: %w",
+				messages.UnableToFindWorkspace(workspaceName).String(),
+				err,
+			)
+		}
+
+		workspaceID = workspace.ID
+	} else {
+		id, err := strconv.ParseUint(workspaceIDStr, 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf(
+				"%s: %w",
+				messages.InvalidWorkspaceIDHeader.String(),
+				err,
+			)
+		}
+
+		workspaceID = uint(id)
+	}
+
+	return workspaceID, nil
 }

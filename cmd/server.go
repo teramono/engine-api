@@ -8,17 +8,20 @@ import (
 )
 
 func main() {
-	// ...
+	// Establish api engine setup.
 	setup, err := setup.NewAPIEngineSetup()
 	if err != nil {
-		log.Fatalln(err)
+		log.Panic(err)
 	}
 
-	// ...
+	// Create server.
 	server, err := server.NewAPIServer(setup)
 	if err != nil {
-		log.Fatalln(err)
+		log.Panic(err)
 	}
 
+	defer server.BrokerClient.Close()
+
+	// Start server.
 	server.Listen()
 }

@@ -1,17 +1,19 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/teramono/utilities/pkg/broker"
 	"github.com/teramono/utilities/pkg/database/models"
+	"github.com/teramono/utilities/pkg/logs"
 	"github.com/teramono/utilities/pkg/messages"
 	"github.com/teramono/utilities/pkg/request"
 	"github.com/teramono/utilities/pkg/response"
-	"gorm.io/gorm"
 )
 
 func (server *APIServer) CreateWorkspaces(ctx *gin.Context) {
@@ -20,43 +22,54 @@ func (server *APIServer) CreateWorkspaces(ctx *gin.Context) {
 	validErrs, err := server.validateBody(ctx, &body)
 	if err != nil {
 		response.SetServerErrorResponse(ctx)
-		server.logPanicf("%s: %v", messages.InvalidBodyJson, err)
+		logs.Panicf(server, "%s: %v", messages.InvalidBodyJson, err)
+		return
 	}
 
 	if len(validErrs) > 0 {
 		response.SetUserValidationErrorResponse(ctx, validErrs)
-		server.logf("%s - %v", messages.ValidationError.String(), validErrs)
+		logs.Printf(server, "%s - %v", messages.ValidationError.String(), validErrs)
 		return
 	}
 
 	// Get authorisation credentials from header.
-	authCreds := ctx.GetHeader(request.AuthorizationHeader)
-	if authCreds == "" {
+	authCreds := ctx.Request.Header[request.AuthorizationHeader]
+	if len(authCreds) < 1 {
 		response.SetUserErrorResponse(ctx, messages.InvalidAuthorizationHeader)
-		server.logf(messages.InvalidAuthorizationHeader.String())
+		logs.Printf(server, messages.InvalidAuthorizationHeader.String())
 		return
 	}
 
 	// Construct message with auth header and workspace name in data.
-	data := []byte(fmt.Sprintf(`{"workspaceName":"%s"}`, body.WorkspaceName))
-	msg, err := broker.Json(broker.M{(request.AuthorizationHeader): authCreds}, data)
+	data := fmt.Sprintf(`{"workspaceName":"%s"}`, body.WorkspaceName)
+	msg, err := broker.JsonFromMsgData(
+		broker.NewURLFromCtx(ctx),
+		broker.Header{
+			(request.AuthorizationHeader): authCreds,
+		},
+		data,
+		http.StatusOK,
+	)
 	if err != nil {
 		response.SetServerErrorResponse(ctx)
-		server.logPanicf("%s: %v", messages.InvalidMessageJson, err)
+		logs.Panicf(server, "%s: %v", messages.InvalidMessageJson, err)
+		return
 	}
 
 	// Create a new workspace in the db.
 	workspace := models.Workspace{Name: body.WorkspaceName}
 	if err := workspace.Create(&server.DB); err != nil {
 		response.SetServerErrorResponse(ctx, messages.UnableToCreateWorkspace(body.WorkspaceName))
-		server.logPanicf("%s: %v", messages.UnableToCreateWorkspace(body.WorkspaceName).String(), err)
+		logs.Panicf(server, "%s: %v", messages.UnableToCreateWorkspace(body.WorkspaceName).String(), err)
+		return
 	}
 
 	// Publish create subject with workspace id.
-	subject := server.subjectOf("create", workspace.ID)
+	subject := broker.GetWorkspacesSubjectWithId(&server.Config, "create", workspace.ID)
 	if err := server.Publish(subject, msg); err != nil {
 		response.SetServerErrorResponse(ctx, messages.UnableToPublish(subject))
-		server.logPanicf("%s: %v", messages.UnableToPublish(subject).String(), err)
+		logs.Panicf(server, "%s: %v", messages.UnableToPublish(subject).String(), err)
+		return
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{
@@ -64,110 +77,65 @@ func (server *APIServer) CreateWorkspaces(ctx *gin.Context) {
 	})
 }
 
-func (server *APIServer) LoginWorkspaces(ctx *gin.Context) {
-	// Get workspace name from header.
-	workspaceName := ctx.GetHeader(request.WorkspaceNameHeader)
-	if workspaceName == "" {
-		response.SetUserErrorResponse(ctx, messages.InvalidWorkspaceNameHeader)
-		server.logf(messages.InvalidWorkspaceNameHeader.String())
-		return
-	}
-
-	// Get authorisation credentials from header.
-	authCreds := ctx.GetHeader(request.AuthorizationHeader)
-	if authCreds == "" {
-		response.SetUserErrorResponse(ctx, messages.InvalidAuthorizationHeader)
-		server.logf(messages.InvalidAuthorizationHeader.String())
-		return
-	}
-
-	// Get workspace by name.
-	workspace, err := (&models.Workspace{Name: workspaceName}).GetByName(&server.DB)
-	if err != nil {
-		response.SetServerErrorResponse(ctx, messages.UnableToFindWorkspace(workspaceName))
-		server.logPanicf("%s: %v", messages.UnableToFindWorkspace(workspaceName).String(), err)
-	}
-
-	// Construct message with auth header.
-	msg, err := broker.Json(broker.M{
-		(request.AuthorizationHeader): authCreds,
-	}, []byte{})
-	if err != nil {
-		response.SetServerErrorResponse(ctx)
-		server.logPanicf("%s: %v", messages.InvalidMessageJson, err)
-	}
-
-	// Publish login subject with workspace id.
-	subject := server.subjectOf("login", workspace.ID)
-	if err := server.Publish(subject, msg); err != nil {
-		response.SetServerErrorResponse(ctx, messages.UnableToPublish(subject))
-		server.logPanicf("%s: %v", messages.UnableToPublish(subject).String(), err)
-	}
-
-	ctx.JSON(http.StatusOK, gin.H{ //
-		"message": messages.LoggingIn,
-	})
-}
-
-func (server *APIServer) RunWorkspaces(ctx *gin.Context) {
+func (server *APIServer) Run(ctx *gin.Context) {
 	// Get workspace id from header.
-	workspaceIDStr := ctx.GetHeader(request.WorkspaceIDHeader)
-	if workspaceIDStr == "" {
-		response.SetUserErrorResponse(ctx, messages.InvalidWorkspaceIDHeader)
-		server.logf(messages.InvalidWorkspaceIDHeader.String())
-		return
-	}
-
-	workspaceID, err := strconv.Atoi(workspaceIDStr)
+	workspaceID, err := server.getWorkspaceID(ctx)
 	if err != nil {
 		response.SetUserErrorResponse(ctx, messages.InvalidWorkspaceIDHeader)
-		server.logf(messages.InvalidWorkspaceIDHeader.String())
-		return
-	}
-
-	// Find workspace with id in the db.
-	exists, err := (&models.Workspace{
-		Model: gorm.Model{
-			ID: uint(workspaceID),
-		},
-	}).Exists(&server.DB)
-	if err != nil {
-		response.SetServerErrorResponse(ctx, messages.UnableToFindWorkspace(workspaceIDStr))
-		server.logPanicf("%s: %v", messages.UnableToFindWorkspace(workspaceIDStr).String(), err)
-	}
-
-	if !exists {
-		response.SetUserErrorResponse(ctx, messages.UnableToFindWorkspace(workspaceIDStr))
-		server.logf(messages.UnableToFindWorkspace(workspaceIDStr).String())
+		logs.Printf(server, "%v", err)
 		return
 	}
 
 	// Get all header details.
-	header := GetHeadersAsInterface(ctx)
+	header := server.getHeaders(ctx)
 
 	// Get body details.
 	data, err := ctx.GetRawData()
 	if err != nil {
 		response.SetServerErrorResponse(ctx, messages.UnableToGetBody)
-		server.logPanicf("%s: %v", messages.UnableToGetBody.String(), err)
+		logs.Panicf(server, "%s: %v", messages.UnableToGetBody.String(), err)
+		return
 	}
 
 	// Construct message with everything from header and body.
-	msg, err := broker.Json(header, data)
+	msg, err := broker.JsonFromMsgData(broker.NewURLFromCtx(ctx), header, string(data), 0)
 	if err != nil {
 		response.SetServerErrorResponse(ctx)
-		server.logPanicf("%s: %v", messages.InvalidMessageJson, err)
+		logs.Panicf(server, "%s: %v", messages.InvalidMessageJson, err)
+		return
 	}
 
 	// Publish login subject with workspace id.
-	subject := server.subjectOf("run", uint(workspaceID))
-	if err := server.Publish(subject, msg); err != nil {
-		response.SetServerErrorResponse(ctx, messages.UnableToPublish(subject))
-		server.logPanicf("%s: %v", messages.UnableToPublish(subject).String(), err)
+	subject := broker.GetWorkspacesSubjectWithId(&server.Config, "run", workspaceID)
+	timeout := time.Duration(server.Config.Engines.API.ReplyTimeout) * time.Second
+	reply, err := server.Request(subject, msg, timeout)
+	if err != nil {
+		response.SetServerErrorResponse(ctx)
+		logs.Panicf(server, "%s: %v", messages.UnableToPublish(subject).String(), err)
+		return
 	}
 
-	// TODO:
-	ctx.JSON(http.StatusOK, gin.H{ //
-		"message": messages.ScriptStarted,
-	})
+	// Get response data from server.
+	replyMsgData, err := broker.NewMsgData(reply)
+	if err != nil {
+		response.SetServerErrorResponse(ctx, messages.InvalidReplyJson)
+		logs.Panicf(server, "%s: %v", messages.InvalidReplyJson.String(), err)
+		return
+	}
+
+	// Set headers from reply msg data.
+	for k, v := range replyMsgData.Headers {
+		ctx.Header(k, strings.Join(v, ";"))
+	}
+
+	// TODO: Determine how to returnn value based on Content-Type
+	var body gin.H
+	if err = json.Unmarshal([]byte(replyMsgData.Data), &body); err != nil {
+		response.SetServerErrorResponse(ctx, messages.InvalidReplyDataJson)
+		logs.Panicf(server, "%s: %v", messages.InvalidReplyDataJson.String(), err)
+		return
+	}
+
+	// Set body data and status code from reply msg data.
+	ctx.JSON(int(replyMsgData.StatusCode), body)
 }
