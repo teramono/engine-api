@@ -38,7 +38,10 @@ func (server *APIServer) Listen() error {
 	router.Use(static.Serve("/", static.LocalFile(server.Config.UI.Dir, true)))
 
 	// Run route.
-	router.Any("/run/*all", server.Run)
+	router.Any("/r/*all", server.Run)
+
+	// Static file serving route.
+	router.Any("/f/*all", func(c *gin.Context) {}) // TODO: Example /f/files/armadillo.png
 
 	// Workspaces routes.
 	workpacesRouter := router.Group("/workspaces")
